@@ -1,8 +1,9 @@
 #ifndef CLIENT_COMMANDS_H
 #define CLIENT_COMMANDS_H
+using namespace std;
 
 #include <string>
 
-void processUserInput(int sockfd, const std::string &input);
+bool processUserInput(int sockfd, const string &input);
 
 #endif

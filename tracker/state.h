@@ -7,12 +7,11 @@
 #include <pthread.h>
 using namespace std;
 
-//Usr Manage
-extern map<string, string> users; // username -> password
+//User Manage
+extern map<string, string> users; 
 extern map<int, string> session_by_fd;
 extern map<string, int> fd_by_username;
 extern pthread_mutex_t state_mutex;
-
 
 //Grp Manage
 extern map<string, set<string>> groups;

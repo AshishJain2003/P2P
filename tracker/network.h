@@ -4,6 +4,8 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <string>
+using namespace std;
 
 extern int trackerSocket;
 extern int clientSockets[5];
@@ -13,10 +15,9 @@ extern int peer;
 
 int initServer(int port);
 int acceptNewClient();
-int recvFromClient(int clientFd, char *buffer, int size);
-int sendToClient(int clientFd, char *msg);
 int connectToPeerTracker(const char *ip, int port);
-int sendToPeerTracker(char *msg);
-int recvFromPeerTracker(char *buffer, int size);
+
+bool send_msg(int fd, const string& msg);
+bool recv_msg(int fd, string& msg);
 
 #endif

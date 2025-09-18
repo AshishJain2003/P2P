@@ -3,12 +3,16 @@
 #include <iostream>
 using namespace std;
 
-void processUserInput(int sockfd, const string &input) {
-    sendToTracker(sockfd, input.c_str());
-
-    char buffer[1024];
-    int n = recvFromTracker(sockfd, buffer, sizeof(buffer));
-    if (n > 0) {
-        cout << "Reply from tracker: " << buffer << endl;
+bool processUserInput(int sockfd, const std::string &input) {
+    if (!send_msg(sockfd, input)) {
+        cerr << "\nError: Connection to tracker lost." << endl;
+        return false;
     }
+    string reply;
+    if (!recv_msg(sockfd, reply)) {
+        cerr << "\nError: Connection to tracker lost." << endl;
+        return false;
+    }
+    cout << reply << endl;
+    return true;
 }

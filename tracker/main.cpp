@@ -1,241 +1,129 @@
-// #include "network.h"
-// #include "commands.h"
-// #include "state.h"
-// #include <iostream>
-// #include <unistd.h>
-// using namespace std;
-
-// #define PORT 9909
-
-// int main() {
-//     string peer_ip = "127.0.0.1";
-//     int peer_port = 9910;
-
-//     if (initServer(PORT) < 0) return 1;
-
-//     connectToPeerTracker(peer_ip.c_str(), peer_port);
-
-//     while (true) {
-//         FD_ZERO(&fr);
-//         FD_ZERO(&fw);
-//         FD_ZERO(&fe);
-//         FD_SET(trackerSocket, &fr);
-
-//         for (int i = 0; i < 5; i++) {
-//             if (clientSockets[i] > 0) {
-//                 FD_SET(clientSockets[i], &fr);
-//             }
-//         }
-
-//         if (peer >= 0) {
-//             FD_SET(peer, &fr);
-//         }
-
-//         int activity = select(nMaxFd + 1, &fr, &fw, &fe, NULL);
-//         if (activity < 0) {
-//             cerr << "Select error\n";
-//             break;
-//         }
-
-//         if (FD_ISSET(trackerSocket, &fr)) {
-//             acceptNewClient();
-//         }
-
-//         char buffer[1024];
-
-//         for (int i = 0; i < 5; i++) {
-//             int fd = clientSockets[i];
-//             if (fd > 0 && FD_ISSET(fd, &fr)) {
-//                 int n = recvFromClient(fd, buffer, sizeof(buffer));
-//                 if (n > 0) {
-//                     handleCommand(fd, buffer);
-//                 } else {
-//                     pthread_mutex_lock(&state_mutex);
-//                     if (session_by_fd.count(fd)) {
-//                         string user_id = session_by_fd[fd];
-//                         session_by_fd.erase(fd);
-//                         fd_by_username.erase(user_id);
-//                         cout << "User " << user_id
-//                              << " logged out due to disconnect (fd=" << fd << ")" << endl;
-//                     }
-//                     pthread_mutex_unlock(&state_mutex);
-//                     cout << "Client disconnected: " << fd << endl;
-//                     close(fd);
-//                     clientSockets[i] = 0;
-//                 }
-//             }
-//         }
-
-//         if (peer >= 0 && FD_ISSET(peer, &fr)) {
-//             int n = recvFromPeerTracker(buffer, sizeof(buffer));
-//             if (n > 0) {
-//                 handleCommand(peer, buffer); 
-//             }
-//         }
-//     }
-
-//     return 0;
-// }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include "network.h"
 #include "commands.h"
 #include "state.h"
+#include "main.h" 
 #include <iostream>
-#include <fstream>
 #include <vector>
 #include <string>
 #include <sstream>
 #include <unistd.h>
 #include <cstdlib>
+#include <fcntl.h> 
+#include <sys/stat.h>
 
 using namespace std;
 
-// Helper function to parse "IP:PORT" strings from the config file
-pair<string, int> parseAddress(const string& address) {
-    size_t colon_pos = address.find(':');
+TrackerInfo parseAddress(const string& addr) {
+    TrackerInfo info;
+    size_t colon_pos = addr.find(':');
     if (colon_pos == string::npos) {
-        cerr << "FATAL: Invalid address format in tracker_info.txt: " << address << endl;
+        cerr << "Invalid address format: " << addr << endl;
         exit(1);
     }
-    string ip = address.substr(0, colon_pos);
-    int port = stoi(address.substr(colon_pos + 1));
-    return {ip, port};
+    info.ip = addr.substr(0, colon_pos);
+    info.port = stoi(addr.substr(colon_pos + 1));
+    return info;
 }
-
 
 int main(int argc, char *argv[]) {
     if (argc != 3) {
-        cerr << "Usage: " << argv[0] << " tracker_info.txt <tracker_no>" << endl;
+        cerr << "Usage: ./tracker.out <tracker_info_file> <tracker_no>" << endl;
         return 1;
     }
-
-    string config_file_path = argv[1];
-    int tracker_number = atoi(argv[2]);
-
-    // Read tracker addresses from the config file
-    ifstream config_file(config_file_path);
-    if (!config_file.is_open()) {
-        cerr << "Error: Could not open file " << config_file_path << endl;
+    string tracker_file_path = argv[1];
+    int tracker_num = atoi(argv[2]);
+    if (tracker_num != 1 && tracker_num != 2) {
+        cerr << "Error: tracker_no must be 1 or 2." << endl;
         return 1;
     }
-
-    vector<string> tracker_addresses;
+    
+    vector<TrackerInfo> trackers;
+    int fd = open(tracker_file_path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        perror("Error opening tracker_info.txt");
+        return 1;
+    }
+    char buffer[1024];
+    int bytes_read = read(fd, buffer, sizeof(buffer) - 1);
+    close(fd);
+    if (bytes_read < 0) {
+        perror("Error reading tracker_info.txt");
+        return 1;
+    }
+    buffer[bytes_read] = '\0';
+    stringstream ss(buffer);
     string line;
-    while (getline(config_file, line)) {
+    while (getline(ss, line)) {
         if (!line.empty()) {
-            tracker_addresses.push_back(line);
+            trackers.push_back(parseAddress(line));
         }
     }
-    config_file.close();
 
-    if (tracker_addresses.size() < 2) {
-        cerr << "Error: tracker_info.txt must contain at least two tracker addresses." << endl;
+    if (trackers.size() != 2) {
+        cerr << "Error: tracker_info.txt must contain exactly two tracker addresses." << endl;
         return 1;
     }
     
-    if (tracker_number != 1 && tracker_number != 2) {
-        cerr << "Error: tracker number must be 1 or 2." << endl;
-        return 1;
-    }
+    TrackerInfo my_info = trackers[tracker_num - 1];
+    TrackerInfo peer_info = trackers[tracker_num == 1 ? 1 : 0];
 
-    // Determine this tracker's port and the peer's IP/port
-    string my_address_str = tracker_addresses[tracker_number - 1];
-    string peer_address_str = tracker_addresses[tracker_number == 1 ? 1 : 0]; // If I am 1, peer is 2 (index 1). If I am 2, peer is 1 (index 0).
-
-    pair<string, int> my_details = parseAddress(my_address_str);
-    pair<string, int> peer_details = parseAddress(peer_address_str);
+    if (initServer(my_info.port) < 0) return 1;
+    connectToPeerTracker(peer_info.ip.c_str(), peer_info.port);
     
-    int listening_port = my_details.second;
-    string peer_ip = peer_details.first;
-    int peer_port = peer_details.second;
-
-    // Initialize server on our designated port
-    if (initServer(listening_port) < 0) {
-        return 1;
-    }
-    
-    // Give the other tracker a moment to start up before connecting
-    sleep(1);
-
-    // Connect to the peer tracker
-    connectToPeerTracker(peer_ip.c_str(), peer_port);
-
-
-    // Your original main loop starts here, with all variables unchanged
     while (true) {
         FD_ZERO(&fr);
-        FD_ZERO(&fw);
-        FD_ZERO(&fe);
         FD_SET(trackerSocket, &fr);
+        for (int i = 0; i < 5; i++) {
+            if (clientSockets[i] > 0) FD_SET(clientSockets[i], &fr);
+        }
+        if (peer >= 0) FD_SET(peer, &fr);
+
+        nMaxFd = trackerSocket;
+        if(peer > nMaxFd) nMaxFd = peer;
+        for(int i=0; i<5; ++i) {
+            if(clientSockets[i] > nMaxFd) nMaxFd = clientSockets[i];
+        }
+
+        struct timeval tv = {1, 0};
+        int activity = select(nMaxFd + 1, &fr, NULL, NULL, &tv);
+
+        if (activity < 0) { cerr << "Select error\n"; break; }
+        if (activity == 0) continue; 
+
+        if (FD_ISSET(trackerSocket, &fr)) acceptNewClient();
+        
+        string received_cmd;
 
         for (int i = 0; i < 5; i++) {
-            if (clientSockets[i] > 0) {
-                FD_SET(clientSockets[i], &fr);
-            }
-        }
-
-        if (peer >= 0) {
-            FD_SET(peer, &fr);
-        }
-
-        int activity = select(nMaxFd + 1, &fr, &fw, &fe, NULL);
-        if (activity < 0) {
-            cerr << "Select error\n";
-            break;
-        }
-
-        if (FD_ISSET(trackerSocket, &fr)) {
-            acceptNewClient();
-        }
-
-        char buffer[1024];
-
-        for (int i = 0; i < 5; i++) {
-            int fd = clientSockets[i];
-            if (fd > 0 && FD_ISSET(fd, &fr)) {
-                int n = recvFromClient(fd, buffer, sizeof(buffer));
-                if (n > 0) {
-                    handleCommand(fd, buffer);
-                } else {
+            int sock_fd = clientSockets[i];
+            if (sock_fd > 0 && FD_ISSET(sock_fd, &fr)) {
+                if (!recv_msg(sock_fd, received_cmd)) {
                     pthread_mutex_lock(&state_mutex);
-                    if (session_by_fd.count(fd)) {
-                        string user_id = session_by_fd[fd];
-                        session_by_fd.erase(fd);
+                    if (session_by_fd.count(sock_fd)) {
+                        string user_id = session_by_fd[sock_fd];
+                        session_by_fd.erase(sock_fd);
                         fd_by_username.erase(user_id);
-                        cout << "User " << user_id
-                             << " logged out due to disconnect (fd=" << fd << ")" << endl;
+                        cout << "User " << user_id << " logged out due to disconnect (fd=" << sock_fd << ")" << endl;
                     }
                     pthread_mutex_unlock(&state_mutex);
-                    cout << "Client disconnected: " << fd << endl;
-                    close(fd);
+                    cout << "Client disconnected: " << sock_fd << endl;
+                    close(sock_fd);
                     clientSockets[i] = 0;
+                } else {
+                     handleCommand(sock_fd, received_cmd, peer_info);
                 }
             }
         }
-
+        
         if (peer >= 0 && FD_ISSET(peer, &fr)) {
-            int n = recvFromPeerTracker(buffer, sizeof(buffer));
-            if (n > 0) {
-                handleCommand(peer, buffer); 
+            if (!recv_msg(peer, received_cmd)) {
+                cout << "Peer tracker disconnected." << endl;
+                close(peer);
+                peer = -1;
+            } else {
+                handleCommand(peer, received_cmd, peer_info);
             }
         }
     }
-
     return 0;
 }

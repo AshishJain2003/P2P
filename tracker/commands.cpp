@@ -14,15 +14,8 @@ vector<string> tokenize(string cmd)
     istringstream iss(cmd);
     string word;
     while (iss >> word)
-    {
         tokens.push_back(word);
-    }
     return tokens;
-}
-
-void sendMsg(int fd, string msg)
-{
-    send(fd, msg.c_str(), msg.size(), 0);
 }
 
 void handleSyncCommand(vector<string> &tokens)
@@ -30,182 +23,123 @@ void handleSyncCommand(vector<string> &tokens)
     if (tokens.size() < 2)
         return;
     string syncComm = tokens[1];
-
+    pthread_mutex_lock(&state_mutex);
     if (syncComm == "create_user" && tokens.size() == 4)
     {
-        string user_id = tokens[2];
-        string password = tokens[3];
-        pthread_mutex_lock(&state_mutex);
-        users[user_id] = password;
-        pthread_mutex_unlock(&state_mutex);
-        cout << "[SYNC] User created: " << user_id << endl;
+        users[tokens[2]] = tokens[3];
+        cout << "[SYNC] User created: " << tokens[2] << endl;
     }
-
-    // else if (syncComm == "login" && tokens.size() == 4) {
-    //     string user_id = tokens[2];
-    //     string fd_str = tokens[3];
-    //     int fakeFd = stoi(fd_str);
-    //     pthread_mutex_lock(&state_mutex);
-    //     fd_by_username[user_id] = fakeFd;
-    //     session_by_fd[fakeFd] = user_id;
-    //     pthread_mutex_unlock(&state_mutex);
-    //     cout << "[SYNC] User logged in: " << user_id << endl;
-    // }
-
-    // else if (syncComm == "logout" && tokens.size() == 3) {
-    //     string user_id = tokens[2];
-    //     pthread_mutex_lock(&state_mutex);
-    //     if (fd_by_username.count(user_id)) {
-    //         int fd = fd_by_username[user_id];
-    //         fd_by_username.erase(user_id);
-    //         session_by_fd.erase(fd);
-    //     }
-    //     pthread_mutex_unlock(&state_mutex);
-    //     cout << "[SYNC] User logged out: " << user_id << endl;
-    // }
-
     else if (syncComm == "create_group" && tokens.size() == 4)
     {
-        string grp_id = tokens[2];
-        string user_id = tokens[3];
-        pthread_mutex_lock(&state_mutex);
-        groups[grp_id].insert(user_id);
-        groupAdmin[grp_id] = user_id;
-        pthread_mutex_unlock(&state_mutex);
-        cout << "[SYNC] Group created: " << grp_id << " by " << user_id << endl;
+        groups[tokens[2]].insert(tokens[3]);
+        groupAdmin[tokens[2]] = tokens[3];
+        cout << "[SYNC] Group created: " << tokens[2] << " by " << tokens[3] << endl;
     }
-
     else if (syncComm == "join_group" && tokens.size() == 4)
     {
-        string grp_id = tokens[2];
-        string user_id = tokens[3];
-        pthread_mutex_lock(&state_mutex);
-        joinRequests[grp_id].insert(user_id);
-        pthread_mutex_unlock(&state_mutex);
-        cout << "[SYNC] " << user_id << " requested to join group " << grp_id << endl;
+        joinRequests[tokens[2]].insert(tokens[3]);
+        cout << "[SYNC] Join request for group " << tokens[2] << " from " << tokens[3] << endl;
     }
-
     else if (syncComm == "leave_group" && tokens.size() == 4)
     {
-        string grp_id = tokens[2];
-        string user_id = tokens[3];
-        pthread_mutex_lock(&state_mutex);
-        if (groups.count(grp_id))
+        string group_id = tokens[2], user_id = tokens[3];
+        groups[group_id].erase(user_id);
+        if (groups[group_id].empty())
         {
-            groups[grp_id].erase(user_id);
-            if (groups[grp_id].empty())
-            {
-                groups.erase(grp_id);
-                groupAdmin.erase(grp_id);
-                joinRequests.erase(grp_id);
-                cout << "[SYNC] Group " << grp_id << " deleted (empty)" << endl;
-            }
-            else if (groupAdmin[grp_id] == user_id)
-            {
-                groupAdmin[grp_id] = *groups[grp_id].begin();
-            }
+            groups.erase(group_id);
+            groupAdmin.erase(group_id);
+            joinRequests.erase(group_id);
+            cout << "[SYNC] Group deleted (empty): " << group_id << endl;
         }
-        pthread_mutex_unlock(&state_mutex);
-        cout << "[SYNC] " << user_id << " left group " << grp_id << endl;
+        else if (groupAdmin[group_id] == user_id)
+        {
+            groupAdmin[group_id] = *groups[group_id].begin();
+            cout << "[SYNC] Admin of group " << group_id << " reassigned" << endl;
+        }
+        cout << "[SYNC] User " << user_id << " left group " << group_id << endl;
     }
-
     else if (syncComm == "accept_request" && tokens.size() == 4)
     {
-        string grp_id = tokens[2];
-        string final_user = tokens[3];
-        pthread_mutex_lock(&state_mutex);
-        groups[grp_id].insert(final_user);
-        joinRequests[grp_id].erase(final_user);
-        pthread_mutex_unlock(&state_mutex);
-        cout << "[SYNC] User " << final_user << " added to group " << grp_id << endl;
+        joinRequests[tokens[2]].erase(tokens[3]);
+        groups[tokens[2]].insert(tokens[3]);
+        cout << "[SYNC] User " << tokens[3] << " accepted into group " << tokens[2] << endl;
     }
-
     else
     {
         cout << "[SYNC] Unknown sync command: " << syncComm << endl;
     }
+    pthread_mutex_unlock(&state_mutex);
 }
 
-void handleCommand(int clientFd, string cmd)
+void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
 {
-    cout << "Command from client " << clientFd << ": " << cmd << endl;
-
+    if (cmd == "SYNC_INIT")
+    {
+        if (peer < 0)
+        {
+            cout << "Handshake received. Connecting back to peer..." << endl;
+            connectToPeerTracker(peer_info.ip.c_str(), peer_info.port);
+        }
+        return;
+    }
+    cout << "Command from " << (clientFd == peer ? "PEER" : "client") << " " << clientFd << ": " << cmd << endl;
     vector<string> tokens = tokenize(cmd);
     if (tokens.empty())
     {
-        sendMsg(clientFd, "Err: Wrong Syntax");
+        send_msg(clientFd, "Err: Empty Command");
         return;
     }
-
     if (tokens[0] == "SYNC")
     {
         handleSyncCommand(tokens);
         return;
     }
-
     string comm = tokens[0];
-
     if (comm == "create_user")
     {
         if (tokens.size() != 3)
         {
-            sendMsg(clientFd, "Err: Wrong Syntax");
+            send_msg(clientFd, "Err: Usage: create_user <user_id> <password>");
             return;
         }
-
-        string user_id = tokens[1];
-        string password = tokens[2];
-
+        string user_id = tokens[1], password = tokens[2];
         pthread_mutex_lock(&state_mutex);
         if (users.count(user_id))
         {
             pthread_mutex_unlock(&state_mutex);
-            sendMsg(clientFd, "Err : User already exists");
+            send_msg(clientFd, "Err: User already exists");
             return;
         }
-
         users[user_id] = password;
         pthread_mutex_unlock(&state_mutex);
-
-        string sync_msg = "SYNC create_user " + user_id + " " + password;
-        sendToPeerTracker((char *)sync_msg.c_str());
-
-        cout << "User created : " << user_id << endl;
-        sendMsg(clientFd, "OK User Created");
+        send_msg(peer, "SYNC create_user " + user_id + " " + password);
+        send_msg(clientFd, "OK: User Created");
     }
     else if (comm == "login")
     {
         if (tokens.size() != 3)
         {
-            sendMsg(clientFd, "Err: Wrong Syntax");
+            send_msg(clientFd, "Err: Usage: login <user_id> <password>");
             return;
         }
         string user_id = tokens[1], password = tokens[2];
-        string reply_msg; 
-
         pthread_mutex_lock(&state_mutex);
-        if (!users.count(user_id))
+        if (!users.count(user_id) || users[user_id] != password)
         {
-            reply_msg = "Err : User doesn't exists";
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: Invalid credentials");
+            return;
         }
-        else if (users[user_id] != password)
+        if (fd_by_username.count(user_id))
         {
-            reply_msg = "Err : Wrong password";
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: User already logged in");
+            return;
         }
-        else if (fd_by_username.count(user_id))
-        {
-            reply_msg = "Err : Already Logged in";
-        }
-        else
-        {
-            session_by_fd[clientFd] = user_id;
-            fd_by_username[user_id] = clientFd;
-            cout << "User logged in: " << user_id << " (fd=" << clientFd << ")" << endl;
-            reply_msg = "OK Login successful";
-        }
+        session_by_fd[clientFd] = user_id;
+        fd_by_username[user_id] = clientFd;
         pthread_mutex_unlock(&state_mutex);
-
-        sendMsg(clientFd, reply_msg);
+        send_msg(clientFd, "OK: Login successful");
     }
     else if (comm == "logout")
     {
@@ -213,236 +147,223 @@ void handleCommand(int clientFd, string cmd)
         if (!session_by_fd.count(clientFd))
         {
             pthread_mutex_unlock(&state_mutex);
-            sendMsg(clientFd, "Err : Not Logged In");
+            send_msg(clientFd, "Err: You are not logged in");
             return;
         }
         string user_id = session_by_fd[clientFd];
         session_by_fd.erase(clientFd);
         fd_by_username.erase(user_id);
         pthread_mutex_unlock(&state_mutex);
-
-        cout << "User logged out : " << user_id << " (fd=" << clientFd << ")" << endl;
-        sendMsg(clientFd, "OK Logout successfully!");
+        send_msg(clientFd, "OK: Logout successful");
     }
     else if (comm == "create_group")
     {
         if (tokens.size() != 2)
         {
-            sendMsg(clientFd, "Err: Wrong Syntax");
+            send_msg(clientFd, "Err: Usage: create_group <group_id>");
             return;
         }
+        string group_id = tokens[1];
         pthread_mutex_lock(&state_mutex);
         if (!session_by_fd.count(clientFd))
         {
             pthread_mutex_unlock(&state_mutex);
-            sendMsg(clientFd, "Err : Not Logged In");
+            send_msg(clientFd, "Err: You must be logged in");
             return;
         }
-
-        string grp_id = tokens[1];
-        string user_id = session_by_fd[clientFd];
-
-        if (groups.count(grp_id))
+        if (groups.count(group_id))
         {
             pthread_mutex_unlock(&state_mutex);
-            sendMsg(clientFd, "Err : Group Already Exists");
+            send_msg(clientFd, "Err: Group already exists");
             return;
         }
-
-        groups[grp_id].insert(user_id);
-        groupAdmin[grp_id] = user_id;
+        string user_id = session_by_fd[clientFd];
+        groups[group_id].insert(user_id);
+        groupAdmin[group_id] = user_id;
         pthread_mutex_unlock(&state_mutex);
-
-        string sync_msg = "SYNC create_group " + grp_id + " " + user_id;
-        sendToPeerTracker((char *)sync_msg.c_str());
-
-        cout << "Group created: " << grp_id << " by " << user_id << endl;
-        sendMsg(clientFd, "OK Group created");
+        send_msg(peer, "SYNC create_group " + group_id + " " + user_id);
+        send_msg(clientFd, "OK: Group created");
     }
     else if (comm == "join_group")
     {
         if (tokens.size() != 2)
         {
-            sendMsg(clientFd, "Err: Wrong Syntax");
+            send_msg(clientFd, "Err: Usage: join_group <group_id>");
             return;
         }
+        string group_id = tokens[1];
         pthread_mutex_lock(&state_mutex);
         if (!session_by_fd.count(clientFd))
         {
             pthread_mutex_unlock(&state_mutex);
-            sendMsg(clientFd, "Err : Not Logged In");
+            send_msg(clientFd, "Err: You must be logged in");
             return;
         }
-        string grp_id = tokens[1];
-        string user_id = session_by_fd[clientFd];
-
-        if (!groups.count(grp_id))
+        if (!groups.count(group_id))
         {
             pthread_mutex_unlock(&state_mutex);
-            sendMsg(clientFd, "Err : No such group");
+            send_msg(clientFd, "Err: Group does not exist");
             return;
         }
-
-        joinRequests[grp_id].insert(user_id);
+        string user_id = session_by_fd[clientFd];
+        if (groups[group_id].count(user_id))
+        {
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: You are already in the group");
+            return;
+        }
+        joinRequests[group_id].insert(user_id);
         pthread_mutex_unlock(&state_mutex);
-
-        string sync_msg = "SYNC join_group " + grp_id + " " + user_id;
-        sendToPeerTracker((char *)sync_msg.c_str());
-
-        cout << user_id << " requested to join group " << grp_id << endl;
-        sendMsg(clientFd, "OK Join request sent");
+        send_msg(peer, "SYNC join_group " + group_id + " " + user_id);
+        send_msg(clientFd, "OK: Request to join group sent");
     }
     else if (comm == "leave_group")
     {
         if (tokens.size() != 2)
         {
-            sendMsg(clientFd, "Err: Wrong Syntax");
+            send_msg(clientFd, "Err: Usage: leave_group <group_id>");
             return;
         }
+        string group_id = tokens[1];
         pthread_mutex_lock(&state_mutex);
         if (!session_by_fd.count(clientFd))
         {
             pthread_mutex_unlock(&state_mutex);
-            sendMsg(clientFd, "Err : Not Logged In");
+            send_msg(clientFd, "Err: You must be logged in");
             return;
         }
-        string grp_id = tokens[1];
-        string user_id = session_by_fd[clientFd];
-
-        if (!groups.count(grp_id) || !groups[grp_id].count(user_id))
+        if (!groups.count(group_id))
         {
             pthread_mutex_unlock(&state_mutex);
-            sendMsg(clientFd, "Err : Not In Group");
+            send_msg(clientFd, "Err: Group does not exist");
             return;
         }
-
-        groups[grp_id].erase(user_id);
-        if (groups[grp_id].empty())
+        string user_id = session_by_fd[clientFd];
+        if (!groups[group_id].count(user_id))
         {
-            groups.erase(grp_id);
-            groupAdmin.erase(grp_id);
-            joinRequests.erase(grp_id);
-            cout << "Group " << grp_id << " deleted (empty)" << endl;
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: You are not a member of this group");
+            return;
         }
-        else if (groupAdmin[grp_id] == user_id)
+        groups[group_id].erase(user_id);
+        if (groups[group_id].empty())
         {
-            groupAdmin[grp_id] = *groups[grp_id].begin();
+            groups.erase(group_id);
+            groupAdmin.erase(group_id);
+            joinRequests.erase(group_id);
         }
-
-        pthread_mutex_unlock(&state_mutex);
-
-        string sync_msg = "SYNC leave_group " + grp_id + " " + user_id;
-        sendToPeerTracker((char *)sync_msg.c_str());
-
-        cout << user_id << " left group " << grp_id << endl;
-        sendMsg(clientFd, "OK Left group");
-    }
-    else if (comm == "list_groups")
-    {
-        pthread_mutex_lock(&state_mutex);
-        string ans;
-        for (auto &g : groups)
+        else if (groupAdmin[group_id] == user_id)
         {
-            ans += g.first + "\n";
+            groupAdmin[group_id] = *groups[group_id].begin();
         }
         pthread_mutex_unlock(&state_mutex);
-        if (ans.empty())
-            ans = "No groups available";
-        sendMsg(clientFd, ans);
+        send_msg(peer, "SYNC leave_group " + group_id + " " + user_id);
+        send_msg(clientFd, "OK: You have left the group");
     }
     else if (comm == "list_requests")
     {
         if (tokens.size() != 2)
         {
-            sendMsg(clientFd, "Err: Wrong Syntax");
+            send_msg(clientFd, "Err: Usage: list_requests <group_id>");
             return;
         }
+        string group_id = tokens[1];
         pthread_mutex_lock(&state_mutex);
         if (!session_by_fd.count(clientFd))
         {
             pthread_mutex_unlock(&state_mutex);
-            sendMsg(clientFd, "Err : Not Logged In");
+            send_msg(clientFd, "Err: You must be logged in");
             return;
         }
-        string grp_id = tokens[1];
+        if (!groups.count(group_id))
+        {
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: Group does not exist");
+            return;
+        }
         string user_id = session_by_fd[clientFd];
-
-        if (!groups.count(grp_id))
+        if (groupAdmin[group_id] != user_id)
         {
             pthread_mutex_unlock(&state_mutex);
-            sendMsg(clientFd, "Err : No such group");
+            send_msg(clientFd, "Err: Permission denied (not group owner)");
             return;
         }
-        if (groupAdmin[grp_id] != user_id)
+        string response = "Pending requests for " + group_id + ":\n";
+        if (!joinRequests.count(group_id) || joinRequests[group_id].empty())
         {
-            pthread_mutex_unlock(&state_mutex);
-            sendMsg(clientFd, "Err : No admin");
-            return;
+            response += "(None)";
         }
-
-        string ans;
-        for (auto &u : joinRequests[grp_id])
+        else
         {
-            ans += u + "\n";
+            for (const auto &req_user : joinRequests[group_id])
+            {
+                response += req_user + "\n";
+            }
         }
         pthread_mutex_unlock(&state_mutex);
-
-        if (ans.empty())
-            ans = "No requests";
-        sendMsg(clientFd, ans);
+        send_msg(clientFd, response);
     }
     else if (comm == "accept_request")
     {
         if (tokens.size() != 3)
         {
-            sendMsg(clientFd, "Err: Wrong Syntax");
+            send_msg(clientFd, "Err: Usage: accept_request <group_id> <user_id>");
             return;
         }
+        string group_id = tokens[1], user_to_accept = tokens[2];
         pthread_mutex_lock(&state_mutex);
         if (!session_by_fd.count(clientFd))
         {
             pthread_mutex_unlock(&state_mutex);
-            sendMsg(clientFd, "Err : Not Logged In");
+            send_msg(clientFd, "Err: You must be logged in");
             return;
         }
-        string grp_id = tokens[1];
-        string final_user = tokens[2];
-        string user_id = session_by_fd[clientFd];
-
-        if (!groups.count(grp_id))
+        if (!groups.count(group_id))
         {
             pthread_mutex_unlock(&state_mutex);
-            sendMsg(clientFd, "Err : No such group");
+            send_msg(clientFd, "Err: Group does not exist");
             return;
         }
-        if (groupAdmin[grp_id] != user_id)
+        string admin_id = session_by_fd[clientFd];
+        if (groupAdmin[group_id] != admin_id)
         {
             pthread_mutex_unlock(&state_mutex);
-            sendMsg(clientFd, "Err : No Admin");
+            send_msg(clientFd, "Err: Permission denied (not group owner)");
             return;
         }
-        if (!joinRequests[grp_id].count(final_user))
+        if (!joinRequests.count(group_id) || !joinRequests[group_id].count(user_to_accept))
         {
             pthread_mutex_unlock(&state_mutex);
-            sendMsg(clientFd, "Err : No such Request");
+            send_msg(clientFd, "Err: No pending request from this user");
             return;
         }
-
-        joinRequests[grp_id].erase(final_user);
-        groups[grp_id].insert(final_user);
+        joinRequests[group_id].erase(user_to_accept);
+        groups[group_id].insert(user_to_accept);
         pthread_mutex_unlock(&state_mutex);
-
-        string sync_msg = "SYNC accept_request " + grp_id + " " + final_user;
-        sendToPeerTracker((char *)sync_msg.c_str());
-
-        cout << final_user << " added to group " << grp_id << endl;
-        sendMsg(clientFd, "OK User added to group");
+        send_msg(peer, "SYNC accept_request " + group_id + " " + user_to_accept);
+        send_msg(clientFd, "OK: User accepted into group");
+    }
+    else if (comm == "list_groups")
+    {
+        pthread_mutex_lock(&state_mutex);
+        string response = "Available groups:\n";
+        if (groups.empty())
+        {
+            response += "(None)";
+        }
+        else
+        {
+            for (auto const &[group_id, members] : groups)
+            {
+                response += group_id + "\n";
+            }
+        }
+        pthread_mutex_unlock(&state_mutex);
+        send_msg(clientFd, response);
     }
     else
     {
         if (clientFd != peer)
-        {
-            sendMsg(clientFd, "Err: Wrong Command");
-        }
+            send_msg(clientFd, "Err: Wrong or unimplemented command");
     }
 }
