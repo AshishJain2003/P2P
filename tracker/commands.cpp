@@ -6,7 +6,13 @@
 #include <vector>
 #include <unistd.h>
 #include <cstring>
+#include <arpa/inet.h>
+
 using namespace std;
+
+vector<string> tokenize(string cmd);
+void handleSyncCommand(vector<string> &tokens);
+void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info);
 
 vector<string> tokenize(string cmd)
 {
@@ -27,18 +33,15 @@ void handleSyncCommand(vector<string> &tokens)
     if (syncComm == "create_user" && tokens.size() == 4)
     {
         users[tokens[2]] = tokens[3];
-        cout << "[SYNC] User created: " << tokens[2] << endl;
     }
     else if (syncComm == "create_group" && tokens.size() == 4)
     {
         groups[tokens[2]].insert(tokens[3]);
         groupAdmin[tokens[2]] = tokens[3];
-        cout << "[SYNC] Group created: " << tokens[2] << " by " << tokens[3] << endl;
     }
     else if (syncComm == "join_group" && tokens.size() == 4)
     {
         joinRequests[tokens[2]].insert(tokens[3]);
-        cout << "[SYNC] Join request for group " << tokens[2] << " from " << tokens[3] << endl;
     }
     else if (syncComm == "leave_group" && tokens.size() == 4)
     {
@@ -49,24 +52,34 @@ void handleSyncCommand(vector<string> &tokens)
             groups.erase(group_id);
             groupAdmin.erase(group_id);
             joinRequests.erase(group_id);
-            cout << "[SYNC] Group deleted (empty): " << group_id << endl;
         }
         else if (groupAdmin[group_id] == user_id)
         {
             groupAdmin[group_id] = *groups[group_id].begin();
-            cout << "[SYNC] Admin of group " << group_id << " reassigned" << endl;
         }
-        cout << "[SYNC] User " << user_id << " left group " << group_id << endl;
     }
     else if (syncComm == "accept_request" && tokens.size() == 4)
     {
         joinRequests[tokens[2]].erase(tokens[3]);
         groups[tokens[2]].insert(tokens[3]);
-        cout << "[SYNC] User " << tokens[3] << " accepted into group " << tokens[2] << endl;
     }
-    else
+    else if (syncComm == "upload_file")
     {
-        cout << "[SYNC] Unknown sync command: " << syncComm << endl;
+        string group_id = tokens[2];
+        string filename = tokens[3];
+        group_files[group_id][filename].file_size = stoll(tokens[4]);
+        group_files[group_id][filename].piece_hashes.clear();
+        for (size_t i = 5; i < tokens.size(); ++i)
+        {
+            group_files[group_id][filename].piece_hashes.push_back(tokens[i]);
+        }
+    }
+    else if (syncComm == "update_piece_info")
+    {
+        string filename = tokens[2];
+        int piece_index = stoi(tokens[3]);
+        string peer_addr = tokens[4];
+        piece_info[filename][piece_index].insert(peer_addr);
     }
     pthread_mutex_unlock(&state_mutex);
 }
@@ -77,12 +90,10 @@ void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
     {
         if (peer < 0)
         {
-            cout << "Handshake received. Connecting back to peer..." << endl;
             connectToPeerTracker(peer_info.ip.c_str(), peer_info.port);
         }
         return;
     }
-    cout << "Command from " << (clientFd == peer ? "PEER" : "client") << " " << clientFd << ": " << cmd << endl;
     vector<string> tokens = tokenize(cmd);
     if (tokens.empty())
     {
@@ -151,6 +162,7 @@ void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
             return;
         }
         string user_id = session_by_fd[clientFd];
+        peer_addresses.erase(user_id);
         session_by_fd.erase(clientFd);
         fd_by_username.erase(user_id);
         pthread_mutex_unlock(&state_mutex);
@@ -360,6 +372,162 @@ void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
         }
         pthread_mutex_unlock(&state_mutex);
         send_msg(clientFd, response);
+    }
+    else if (comm == "register_port")
+    {
+        if (tokens.size() != 2)
+        {
+            send_msg(clientFd, "Err: Invalid command");
+            return;
+        }
+        pthread_mutex_lock(&state_mutex);
+        if (!session_by_fd.count(clientFd))
+        {
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: Not logged in");
+            return;
+        }
+        string user_id = session_by_fd[clientFd];
+        string port = tokens[1];
+        sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        getpeername(clientFd, (struct sockaddr *)&client_addr, &client_len);
+        string client_ip = inet_ntoa(client_addr.sin_addr);
+        peer_addresses[user_id] = client_ip + ":" + port;
+        pthread_mutex_unlock(&state_mutex);
+        send_msg(clientFd, "OK: Port registered");
+    }
+    else if (comm == "upload_file")
+    {
+        if (tokens.size() < 4)
+        {
+            send_msg(clientFd, "Err: Incomplete upload command");
+            return;
+        }
+        string group_id = tokens[1], filename = tokens[2];
+        long long file_size = stoll(tokens[3]);
+        pthread_mutex_lock(&state_mutex);
+        if (!session_by_fd.count(clientFd))
+        {
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: Not logged in");
+            return;
+        }
+        string user_id = session_by_fd[clientFd];
+        if (!groups.count(group_id) || !groups[group_id].count(user_id))
+        {
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: Not a member of this group");
+            return;
+        }
+        if (group_files.count(group_id) && group_files[group_id].count(filename))
+        {
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: File with this name already exists in the group");
+            return;
+        }
+        string seeder_addr = peer_addresses[user_id];
+        if (seeder_addr.empty())
+        {
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: Client port not registered. Please re-login.");
+            return;
+        }
+        FileInfo info;
+        info.file_size = file_size;
+        for (size_t i = 4; i < tokens.size(); i++)
+            info.piece_hashes.push_back(tokens[i]);
+        group_files[group_id][filename] = info;
+        for (size_t i = 0; i < info.piece_hashes.size(); i++)
+            piece_info[filename][i].insert(seeder_addr);
+        string sync_msg = "SYNC";
+        for (const auto &token : tokens)
+            sync_msg += " " + token;
+        send_msg(peer, sync_msg);
+        pthread_mutex_unlock(&state_mutex);
+        send_msg(clientFd, "OK: File shared successfully");
+    }
+    else if (comm == "list_files")
+    {
+        if (tokens.size() != 2)
+        {
+            send_msg(clientFd, "Err: Usage: list_files <group_id>");
+            return;
+        }
+        string group_id = tokens[1];
+        pthread_mutex_lock(&state_mutex);
+        if (!groups.count(group_id))
+        {
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: Group does not exist");
+            return;
+        }
+        string response = "Files in " + group_id + ":\n";
+        if (!group_files.count(group_id) || group_files[group_id].empty())
+        {
+            response += "(None)";
+        }
+        else
+        {
+            for (auto const &[filename, info] : group_files[group_id])
+            {
+                response += filename + "\n";
+            }
+        }
+        pthread_mutex_unlock(&state_mutex);
+        send_msg(clientFd, response);
+    }
+    else if (comm == "download_file")
+    {
+        if (tokens.size() != 4)
+        {
+            send_msg(clientFd, "Err: Usage: download_file <group_id> <filename> <destination_path>");
+            return;
+        }
+        string group_id = tokens[1];
+        string filename = tokens[2];
+        pthread_mutex_lock(&state_mutex);
+        if (!group_files.count(group_id) || !group_files[group_id].count(filename))
+        {
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: File not found in group");
+            return;
+        }
+        string response = "";
+        FileInfo &info = group_files[group_id][filename];
+        response += to_string(info.file_size);
+        for (const auto &hash : info.piece_hashes)
+        {
+            response += " " + hash;
+        }
+        set<string> peers_with_any_piece;
+        if (piece_info.count(filename))
+        {
+            for (auto const &[piece_index, peer_set] : piece_info[filename])
+            {
+                for (const auto &peer_addr : peer_set)
+                {
+                    peers_with_any_piece.insert(peer_addr);
+                }
+            }
+        }
+        for (const auto &peer_addr : peers_with_any_piece)
+        {
+            response += " " + peer_addr;
+        }
+        pthread_mutex_unlock(&state_mutex);
+        send_msg(clientFd, response);
+    }
+    else if (comm == "update_have_piece")
+    {
+        if (tokens.size() != 4)
+            return;
+        string group_id = tokens[1], filename = tokens[2], seeder_addr = peer_addresses[session_by_fd[clientFd]];
+        int piece_index = stoi(tokens[3]);
+        pthread_mutex_lock(&state_mutex);
+        piece_info[filename][piece_index].insert(seeder_addr);
+        pthread_mutex_unlock(&state_mutex);
+        send_msg(peer, "SYNC update_piece_info " + filename + " " + to_string(piece_index) + " " + seeder_addr);
     }
     else
     {
