@@ -419,7 +419,6 @@ void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
         }
         string user_id = session_by_fd[clientFd];
 
-        // CHECK: Group must exist
         if (!groups.count(group_id))
         {
             pthread_mutex_unlock(&state_mutex);
@@ -427,7 +426,6 @@ void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
             return;
         }
 
-        // CHECK: User must be member of the group
         if (!groups[group_id].count(user_id))
         {
             pthread_mutex_unlock(&state_mutex);
@@ -504,7 +502,6 @@ void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
 
         pthread_mutex_lock(&state_mutex);
 
-        // FIX 1: Check if user is logged in
         if (!session_by_fd.count(clientFd))
         {
             pthread_mutex_unlock(&state_mutex);
@@ -514,7 +511,6 @@ void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
 
         string user_id = session_by_fd[clientFd];
 
-        // FIX 2: Check if group exists
         if (!groups.count(group_id))
         {
             pthread_mutex_unlock(&state_mutex);
@@ -522,7 +518,6 @@ void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
             return;
         }
 
-        // FIX 3: Check if user is a member of the group
         if (!groups[group_id].count(user_id))
         {
             pthread_mutex_unlock(&state_mutex);
@@ -530,7 +525,6 @@ void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
             return;
         }
 
-        // FIX 4: Check if file exists in group
         if (!group_files.count(group_id) || !group_files[group_id].count(filename))
         {
             pthread_mutex_unlock(&state_mutex);
@@ -538,7 +532,6 @@ void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
             return;
         }
 
-        // Now send file metadata
         string response = "";
         FileInfo &info = group_files[group_id][filename];
         response += to_string(info.file_size);

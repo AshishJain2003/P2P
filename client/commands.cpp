@@ -74,7 +74,6 @@ void downloader_worker_func(
 
             vector<string> available_peers(it->second.begin(), it->second.end());
 
-            // Random selection for load balancing
             string peer_to_try = available_peers[rand() % available_peers.size()];
 
             string peer_ip = peer_to_try.substr(0, peer_to_try.find(':'));
@@ -104,14 +103,12 @@ void downloader_worker_func(
                         send_msg(tracker_sock, update_cmd);
                         lock.unlock();
                         
-                        // Update progress
                         downloads_mutex.lock();
                         active_downloads[filename].pieces_downloaded++;
                         int downloaded = active_downloads[filename].pieces_downloaded;
                         int total = active_downloads[filename].total_pieces;
                         downloads_mutex.unlock();
                         
-                        // Print progress every 10% or every 5 pieces
                         if (downloaded % 5 == 0 || (downloaded * 100 / total) % 10 == 0)
                         {
                             cout_mutex.lock();
@@ -156,10 +153,9 @@ void download_thread_func(string group_id, string filename, string dest_path, st
     if (dest_fd < 0)
         return;
 
-    // Initialize download state with [D] status
     downloads_mutex.lock();
     DownloadState state;
-    state.status = "[D]";  // Downloading
+    state.status = "[D]"; 
     state.group_id = group_id;
     state.filename = filename;
     state.total_pieces = num_pieces;
@@ -190,14 +186,12 @@ void download_thread_func(string group_id, string filename, string dest_path, st
         t.join();
     close(dest_fd);
 
-    // Add downloaded file to shared files map
     client_mutex.lock();
     shared_files_map[filename] = dest_path;
     client_mutex.unlock();
 
-    // Mark as completed
     downloads_mutex.lock();
-    active_downloads[filename].status = "[C]";  // Completed
+    active_downloads[filename].status = "[C]"; 
     downloads_mutex.unlock();
     
     cout << "\n[C] [" << group_id << "] " << filename << " - Download Complete!" << endl
@@ -311,7 +305,6 @@ void processUserInput(const string &input)
             {
                 if (state.status == "[D]")
                 {
-                    // Show progress for downloading files
                     int progress_percent = 0;
                     if (state.total_pieces > 0)
                     {
@@ -323,7 +316,6 @@ void processUserInput(const string &input)
                 }
                 else if (state.status == "[C]")
                 {
-                    // Show completed downloads
                     cout << "[C] [" << state.group_id << "] " << filename << endl;
                 }
             }
