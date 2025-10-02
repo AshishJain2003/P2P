@@ -149,7 +149,7 @@ Wait for connection message: `Connected to peer tracker`
 
 **Terminal 4 - Client 2:**
 ```bash
-./client.out 127.0.0.1:9909 tracker_info.txt
+./client.out 127.0.0.1:9910 tracker_info.txt
 ```
 
 Clients automatically register their seeder port after login.
