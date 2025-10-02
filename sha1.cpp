@@ -1,32 +1,9 @@
 #include "sha1.h"
 #include <sstream>
 #include <iomanip>
-#include <fcntl.h>
-#include <unistd.h>
 #include <vector>
 
 using namespace std;
-
-static const size_t BLOCK_INTS = 16;
-static const size_t BLOCK_BYTES = BLOCK_INTS * 4;
-
-static void buffer_to_block(const string &buffer, uint32_t block[BLOCK_INTS])
-{
-    for (size_t i = 0; i < BLOCK_INTS; i++)
-    {
-        block[i] = (buffer[4 * i + 3] & 0xff) | (buffer[4 * i + 2] & 0xff) << 8 | (buffer[4 * i + 1] & 0xff) << 16 | (buffer[4 * i + 0] & 0xff) << 24;
-    }
-}
-
-SHA1::SHA1()
-{
-    digest[0] = 0x67452301;
-    digest[1] = 0xefcdab89;
-    digest[2] = 0x98badcfe;
-    digest[3] = 0x10325476;
-    digest[4] = 0xc3d2e1f0;
-    transforms = 0;
-}
 
 #define rol(value, bits) (((value) << (bits)) | ((value) >> (32 - (bits))))
 #define blk(i) (block[i & 15] = rol(block[(i + 13) & 15] ^ block[(i + 8) & 15] ^ block[(i + 2) & 15] ^ block[i & 15], 1))
@@ -47,79 +24,7 @@ SHA1::SHA1()
     z += (w ^ x ^ y) + blk(i) + 0xca62c1d6 + rol(v, 5); \
     w = rol(w, 30);
 
-void transform(uint32_t digest[], uint32_t block[BLOCK_INTS], uint64_t &transforms);
-
-void SHA1::update(const string &s)
-{
-    update(s.c_str(), s.length());
-}
-
-void SHA1::update(const char *data, size_t len)
-{
-    string str(data, len);
-    buffer += str;
-    while (buffer.size() >= BLOCK_BYTES)
-    {
-        uint32_t block[BLOCK_INTS];
-        buffer_to_block(buffer, block);
-        transform(digest, block, transforms);
-        buffer.erase(0, BLOCK_BYTES);
-    }
-}
-
-string SHA1::final()
-{
-    uint64_t total_bits = (transforms * BLOCK_BYTES + buffer.size()) * 8;
-    buffer += 0x80;
-    size_t orig_size = buffer.size();
-    while (buffer.size() < BLOCK_BYTES)
-    {
-        buffer += (char)0x00;
-    }
-    uint32_t block[BLOCK_INTS];
-    buffer_to_block(buffer, block);
-    if (orig_size > BLOCK_BYTES - 8)
-    {
-        transform(digest, block, transforms);
-        for (size_t i = 0; i < BLOCK_INTS - 2; i++)
-            block[i] = 0;
-    }
-    block[BLOCK_INTS - 1] = total_bits;
-    block[BLOCK_INTS - 2] = (total_bits >> 32);
-    transform(digest, block, transforms);
-    ostringstream result;
-    for (size_t i = 0; i < sizeof(digest) / sizeof(digest[0]); i++)
-    {
-        result << hex << setfill('0') << setw(8) << digest[i];
-    }
-    return result.str();
-}
-
-string SHA1::from_file(const string &filename)
-{
-    int fd = open(filename.c_str(), O_RDONLY);
-    if (fd < 0)
-        return "";
-    SHA1 checksum;
-    char buffer[4096];
-    int bytes_read = 0;
-    while ((bytes_read = read(fd, buffer, sizeof(buffer))) > 0)
-    {
-        checksum.update(buffer, bytes_read);
-    }
-    close(fd);
-    return checksum.final();
-}
-
-string SHA1::from_data(const char *data, size_t len)
-{
-    string s(data, len);
-    SHA1 checksum;
-    checksum.update(s);
-    return checksum.final();
-}
-
-void transform(uint32_t digest[], uint32_t block[BLOCK_INTS], uint64_t &transforms)
+void transform(uint32_t digest[], uint32_t block[16])
 {
     uint32_t a = digest[0], b = digest[1], c = digest[2], d = digest[3], e = digest[4];
     R0(a, b, c, d, e, 0);
@@ -207,5 +112,37 @@ void transform(uint32_t digest[], uint32_t block[BLOCK_INTS], uint64_t &transfor
     digest[2] += c;
     digest[3] += d;
     digest[4] += e;
-    transforms++;
+}
+
+string sha1(const string &str)
+{
+    uint32_t digest[5] = {0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0};
+    string p_string = str;
+    uint64_t total_bits = p_string.size() * 8;
+    p_string += (char)0x80;
+    while (p_string.size() % 64 != 56)
+        p_string += (char)0x00;
+    for (int i = 0; i < 8; ++i)
+        p_string += (char)((total_bits >> (56 - i * 8)) & 0xFF);
+    uint32_t block[16];
+    for (size_t i = 0; i < p_string.size() / 64; ++i)
+    {
+        for (int j = 0; j < 16; ++j)
+        {
+            block[j] = (p_string[i * 64 + j * 4] << 24) | (p_string[i * 64 + j * 4 + 1] << 16) | (p_string[i * 64 + j * 4 + 2] << 8) | p_string[i * 64 + j * 4 + 3];
+        }
+        transform(digest, block);
+    }
+    ostringstream result;
+    for (int i = 0; i < 5; ++i)
+    {
+        result << hex << setfill('0') << setw(8) << digest[i];
+    }
+    return result.str();
+}
+
+string sha1_from_data(const char *data, size_t len)
+{
+    string s(data, len);
+    return sha1(s);
 }

@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <cstring>
 #include <arpa/inet.h>
+#include <set>
 
 using namespace std;
 
@@ -63,23 +64,24 @@ void handleSyncCommand(vector<string> &tokens)
         joinRequests[tokens[2]].erase(tokens[3]);
         groups[tokens[2]].insert(tokens[3]);
     }
-    else if (syncComm == "upload_file")
-    {
-        string group_id = tokens[2];
-        string filename = tokens[3];
-        group_files[group_id][filename].file_size = stoll(tokens[4]);
-        group_files[group_id][filename].piece_hashes.clear();
-        for (size_t i = 5; i < tokens.size(); ++i)
-        {
-            group_files[group_id][filename].piece_hashes.push_back(tokens[i]);
-        }
-    }
     else if (syncComm == "update_piece_info")
     {
+        if (tokens.size() != 5)
+            return;
         string filename = tokens[2];
         int piece_index = stoi(tokens[3]);
         string peer_addr = tokens[4];
         piece_info[filename][piece_index].insert(peer_addr);
+    }
+    else if (syncComm == "stop_share")
+    {
+        string group_id = tokens[2];
+        string filename = tokens[3];
+        if (group_files.count(group_id))
+        {
+            group_files[group_id].erase(filename);
+        }
+        piece_info.erase(filename);
     }
     pthread_mutex_unlock(&state_mutex);
 }
@@ -406,7 +408,9 @@ void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
         }
         string group_id = tokens[1], filename = tokens[2];
         long long file_size = stoll(tokens[3]);
+
         pthread_mutex_lock(&state_mutex);
+
         if (!session_by_fd.count(clientFd))
         {
             pthread_mutex_unlock(&state_mutex);
@@ -414,12 +418,23 @@ void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
             return;
         }
         string user_id = session_by_fd[clientFd];
-        if (!groups.count(group_id) || !groups[group_id].count(user_id))
+
+        // CHECK: Group must exist
+        if (!groups.count(group_id))
+        {
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: Group does not exist");
+            return;
+        }
+
+        // CHECK: User must be member of the group
+        if (!groups[group_id].count(user_id))
         {
             pthread_mutex_unlock(&state_mutex);
             send_msg(clientFd, "Err: Not a member of this group");
             return;
         }
+
         if (group_files.count(group_id) && group_files[group_id].count(filename))
         {
             pthread_mutex_unlock(&state_mutex);
@@ -486,13 +501,44 @@ void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
         }
         string group_id = tokens[1];
         string filename = tokens[2];
+
         pthread_mutex_lock(&state_mutex);
+
+        // FIX 1: Check if user is logged in
+        if (!session_by_fd.count(clientFd))
+        {
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: You must be logged in");
+            return;
+        }
+
+        string user_id = session_by_fd[clientFd];
+
+        // FIX 2: Check if group exists
+        if (!groups.count(group_id))
+        {
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: Group does not exist");
+            return;
+        }
+
+        // FIX 3: Check if user is a member of the group
+        if (!groups[group_id].count(user_id))
+        {
+            pthread_mutex_unlock(&state_mutex);
+            send_msg(clientFd, "Err: You are not a member of this group");
+            return;
+        }
+
+        // FIX 4: Check if file exists in group
         if (!group_files.count(group_id) || !group_files[group_id].count(filename))
         {
             pthread_mutex_unlock(&state_mutex);
             send_msg(clientFd, "Err: File not found in group");
             return;
         }
+
+        // Now send file metadata
         string response = "";
         FileInfo &info = group_files[group_id][filename];
         response += to_string(info.file_size);
@@ -500,20 +546,19 @@ void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
         {
             response += " " + hash;
         }
-        set<string> peers_with_any_piece;
         if (piece_info.count(filename))
         {
-            for (auto const &[piece_index, peer_set] : piece_info[filename])
+            for (size_t i = 0; i < info.piece_hashes.size(); ++i)
             {
-                for (const auto &peer_addr : peer_set)
+                response += " |";
+                if (piece_info[filename].count(i))
                 {
-                    peers_with_any_piece.insert(peer_addr);
+                    for (const auto &peer_addr : piece_info[filename][i])
+                    {
+                        response += " " + peer_addr;
+                    }
                 }
             }
-        }
-        for (const auto &peer_addr : peers_with_any_piece)
-        {
-            response += " " + peer_addr;
         }
         pthread_mutex_unlock(&state_mutex);
         send_msg(clientFd, response);
@@ -522,12 +567,38 @@ void handleCommand(int clientFd, string cmd, const TrackerInfo &peer_info)
     {
         if (tokens.size() != 4)
             return;
-        string group_id = tokens[1], filename = tokens[2], seeder_addr = peer_addresses[session_by_fd[clientFd]];
+        string group_id = tokens[1], filename = tokens[2];
         int piece_index = stoi(tokens[3]);
         pthread_mutex_lock(&state_mutex);
-        piece_info[filename][piece_index].insert(seeder_addr);
+        if (session_by_fd.count(clientFd))
+        {
+            string user_id = session_by_fd[clientFd];
+            if (peer_addresses.count(user_id))
+            {
+                string seeder_addr = peer_addresses[user_id];
+                piece_info[filename][piece_index].insert(seeder_addr);
+                send_msg(peer, "SYNC update_piece_info " + filename + " " + to_string(piece_index) + " " + seeder_addr);
+            }
+        }
         pthread_mutex_unlock(&state_mutex);
-        send_msg(peer, "SYNC update_piece_info " + filename + " " + to_string(piece_index) + " " + seeder_addr);
+    }
+    else if (comm == "stop_share")
+    {
+        if (tokens.size() != 3)
+        {
+            send_msg(clientFd, "Err: Usage: stop_share <group_id> <filename>");
+            return;
+        }
+        string group_id = tokens[1], filename = tokens[2];
+        pthread_mutex_lock(&state_mutex);
+        if (group_files.count(group_id))
+        {
+            group_files[group_id].erase(filename);
+        }
+        piece_info.erase(filename);
+        pthread_mutex_unlock(&state_mutex);
+        send_msg(peer, "SYNC stop_share " + group_id + " " + filename);
+        send_msg(clientFd, "OK: Stopped sharing " + filename);
     }
     else
     {

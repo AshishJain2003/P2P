@@ -13,6 +13,8 @@
 #include <arpa/inet.h>
 #include <chrono>
 #include <map>
+#include <cstdlib>
+#include <ctime>  
 
 using namespace std;
 
@@ -167,6 +169,9 @@ void connect_to_tracker_with_failover(const string &tracker_info_file)
 
 int main(int argc, char *argv[])
 {
+
+    srand(time(NULL));
+
     signal(SIGPIPE, SIG_IGN);
     if (argc != 3)
     {

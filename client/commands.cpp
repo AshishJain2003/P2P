@@ -13,6 +13,8 @@
 #include <sys/stat.h>
 #include <algorithm>
 #include <map>
+#include <set>
+#include <functional>
 
 using namespace std;
 
@@ -21,69 +23,103 @@ extern int tracker_sock;
 extern string self_listen_port;
 extern map<string, string> shared_files_map;
 
-void download_thread_func(string group_id, string filename, string dest_path, string tracker_response)
+mutex cout_mutex;
+
+struct DownloadState
 {
-    istringstream iss(tracker_response);
-    long long file_size;
-    iss >> file_size;
+    string status = "[D]";
+    string group_id;
+    string filename;
+    int pieces_downloaded = 0;
+    int total_pieces = 0;
+};
 
-    int num_pieces = (file_size + 524288 - 1) / 524288;
-    vector<string> piece_hashes(num_pieces);
-    for (int i = 0; i < num_pieces; ++i)
-    {
-        iss >> piece_hashes[i];
-    }
+map<string, DownloadState> active_downloads;
+mutex downloads_mutex;
 
-    vector<string> peers;
-    string peer_addr;
-    while (iss >> peer_addr)
+void downloader_worker_func(
+    int worker_id,
+    vector<int> &pieces_to_download,
+    mutex &pieces_mutex,
+    const string &group_id,
+    const string &filename,
+    int dest_fd,
+    const vector<string> &piece_hashes,
+    const map<int, set<string>> &piece_peers,
+    size_t &next_peer_idx,
+    mutex &peer_idx_mutex)
+{
+    while (true)
     {
-        peers.push_back(peer_addr);
-    }
+        int piece_index = -1;
+        pieces_mutex.lock();
+        if (!pieces_to_download.empty())
+        {
+            piece_index = pieces_to_download.back();
+            pieces_to_download.pop_back();
+        }
+        pieces_mutex.unlock();
+        if (piece_index == -1)
+            return;
 
-    if (peers.empty())
-    {
-        cout << "Error: No peers found for this file." << endl;
-        return;
-    }
-
-    int dest_fd = open(dest_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (dest_fd < 0)
-    {
-        cout << "Error: Could not create destination file." << endl;
-        return;
-    }
-
-    for (int i = 0; i < num_pieces; ++i)
-    {
         bool piece_downloaded = false;
         while (!piece_downloaded)
         {
-            string peer_to_try = peers[i % peers.size()];
+            auto it = piece_peers.find(piece_index);
+            if (it == piece_peers.end() || it->second.empty())
+            {
+                this_thread::sleep_for(chrono::seconds(2));
+                continue;
+            }
+
+            vector<string> available_peers(it->second.begin(), it->second.end());
+
+            // Random selection for load balancing
+            string peer_to_try = available_peers[rand() % available_peers.size()];
+
             string peer_ip = peer_to_try.substr(0, peer_to_try.find(':'));
             int peer_port = stoi(peer_to_try.substr(peer_to_try.find(':') + 1));
 
             int peer_sock = connectToTracker(peer_ip.c_str(), peer_port);
             if (peer_sock >= 0)
             {
-                string request = "GET " + filename + " " + to_string(i);
+                string request = "GET " + filename + " " + to_string(piece_index);
                 send_msg(peer_sock, request);
-
                 string piece_data;
                 if (recv_msg(peer_sock, piece_data))
                 {
-                    string received_hash = SHA1::from_data(piece_data.c_str(), piece_data.length());
-
-                    if (received_hash == piece_hashes[i])
+                    string received_hash = sha1_from_data(piece_data.c_str(), piece_data.length());
+                    if (received_hash == piece_hashes[piece_index])
                     {
-                        off_t offset = (off_t)i * 524288;
-                        pwrite(dest_fd, piece_data.c_str(), piece_data.length(), offset);
+                        cout_mutex.lock();
+                        cout << "Downloaded piece " << piece_index << " from " << peer_to_try 
+                             << " [Worker " << worker_id << "]" << endl;
+                        cout_mutex.unlock();
 
-                        string update_cmd = "update_have_piece " + group_id + " " + filename + " " + to_string(i);
+                        off_t offset = (off_t)piece_index * 524288;
+                        pwrite(dest_fd, piece_data.c_str(), piece_data.length(), offset);
+                        
+                        string update_cmd = "update_have_piece " + group_id + " " + filename + " " + to_string(piece_index);
                         unique_lock<mutex> lock(client_mutex);
                         send_msg(tracker_sock, update_cmd);
                         lock.unlock();
-
+                        
+                        // Update progress
+                        downloads_mutex.lock();
+                        active_downloads[filename].pieces_downloaded++;
+                        int downloaded = active_downloads[filename].pieces_downloaded;
+                        int total = active_downloads[filename].total_pieces;
+                        downloads_mutex.unlock();
+                        
+                        // Print progress every 10% or every 5 pieces
+                        if (downloaded % 5 == 0 || (downloaded * 100 / total) % 10 == 0)
+                        {
+                            cout_mutex.lock();
+                            cout << "Progress: " << downloaded << "/" << total 
+                                 << " (" << (downloaded * 100 / total) << "%)" << endl;
+                            cout_mutex.unlock();
+                        }
+                        
                         piece_downloaded = true;
                     }
                 }
@@ -93,9 +129,79 @@ void download_thread_func(string group_id, string filename, string dest_path, st
                 this_thread::sleep_for(chrono::seconds(1));
         }
     }
+}
 
+void download_thread_func(string group_id, string filename, string dest_path, string tracker_response)
+{
+    istringstream iss(tracker_response);
+    long long file_size;
+    iss >> file_size;
+    int num_pieces = (file_size + 524288 - 1) / 524288;
+    vector<string> piece_hashes(num_pieces);
+    for (int i = 0; i < num_pieces; ++i)
+        iss >> piece_hashes[i];
+    
+    map<int, set<string>> piece_peers;
+    string token;
+    int current_piece = -1;
+    while (iss >> token)
+    {
+        if (token == "|")
+            current_piece++;
+        else if (current_piece >= 0)
+            piece_peers[current_piece].insert(token);
+    }
+
+    int dest_fd = open(dest_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (dest_fd < 0)
+        return;
+
+    // Initialize download state with [D] status
+    downloads_mutex.lock();
+    DownloadState state;
+    state.status = "[D]";  // Downloading
+    state.group_id = group_id;
+    state.filename = filename;
+    state.total_pieces = num_pieces;
+    state.pieces_downloaded = 0;
+    active_downloads[filename] = state;
+    downloads_mutex.unlock();
+
+    cout << "[D] Started downloading: [" << group_id << "] " << filename 
+         << " (0/" << num_pieces << " pieces)" << endl;
+
+    vector<int> pieces_to_download;
+    for (int i = 0; i < num_pieces; ++i)
+        pieces_to_download.push_back(i);
+    mutex pieces_mutex;
+
+    size_t next_peer_idx = 0;
+    mutex peer_idx_mutex;
+
+    vector<thread> workers;
+    for (int i = 0; i < 4; ++i)
+    {
+        workers.emplace_back(downloader_worker_func, i, ref(pieces_to_download), 
+                           ref(pieces_mutex), group_id, filename, dest_fd, 
+                           piece_hashes, piece_peers, ref(next_peer_idx), 
+                           ref(peer_idx_mutex));
+    }
+    for (auto &t : workers)
+        t.join();
     close(dest_fd);
-    cout << "[C] [" << group_id << "] " << filename << endl;
+
+    // Add downloaded file to shared files map
+    client_mutex.lock();
+    shared_files_map[filename] = dest_path;
+    client_mutex.unlock();
+
+    // Mark as completed
+    downloads_mutex.lock();
+    active_downloads[filename].status = "[C]";  // Completed
+    downloads_mutex.unlock();
+    
+    cout << "\n[C] [" << group_id << "] " << filename << " - Download Complete!" << endl
+         << "> " << flush;
 }
 
 void processUserInput(const string &input)
@@ -112,7 +218,6 @@ void processUserInput(const string &input)
         tokens.push_back(word);
     if (tokens.empty())
         return;
-
     string command = tokens[0];
 
     if (command == "upload_file")
@@ -144,7 +249,7 @@ void processUserInput(const string &input)
         lseek(fd, 0, SEEK_SET);
         while ((bytes_read = read(fd, buffer, 524288)) > 0)
         {
-            command_to_send += " " + SHA1::from_data(buffer, bytes_read);
+            command_to_send += " " + sha1_from_data(buffer, bytes_read);
         }
         close(fd);
         unique_lock<mutex> lock(client_mutex);
@@ -192,6 +297,49 @@ void processUserInput(const string &input)
             tracker_sock = -1;
         }
         return;
+    }
+    else if (command == "show_downloads")
+    {
+        downloads_mutex.lock();
+        if (active_downloads.empty())
+        {
+            cout << "No active or completed downloads." << endl;
+        }
+        else
+        {
+            for (auto const &[filename, state] : active_downloads)
+            {
+                if (state.status == "[D]")
+                {
+                    // Show progress for downloading files
+                    int progress_percent = 0;
+                    if (state.total_pieces > 0)
+                    {
+                        progress_percent = (state.pieces_downloaded * 100) / state.total_pieces;
+                    }
+                    cout << "[D] [" << state.group_id << "] " << filename
+                         << " (" << state.pieces_downloaded << "/" << state.total_pieces
+                         << " pieces - " << progress_percent << "%)" << endl;
+                }
+                else if (state.status == "[C]")
+                {
+                    // Show completed downloads
+                    cout << "[C] [" << state.group_id << "] " << filename << endl;
+                }
+            }
+        }
+        downloads_mutex.unlock();
+        return;
+    }
+    else if (command == "stop_share")
+    {
+        if (tokens.size() != 3)
+        {
+            cout << "Usage: stop_share <group_id> <filename>" << endl;
+            return;
+        }
+        string group_id = tokens[1], filename = tokens[2];
+        shared_files_map.erase(filename);
     }
 
     string reply;
