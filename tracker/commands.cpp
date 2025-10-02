@@ -64,6 +64,19 @@ void handleSyncCommand(vector<string> &tokens)
         joinRequests[tokens[2]].erase(tokens[3]);
         groups[tokens[2]].insert(tokens[3]);
     }
+    else if (syncComm == "upload_file" && tokens.size() >= 5)
+    {
+        string group_id = tokens[2];
+        string filename = tokens[3];
+        long long file_size = stoll(tokens[4]);
+        
+        FileInfo info;
+        info.file_size = file_size;
+        for (size_t i = 5; i < tokens.size(); i++)
+            info.piece_hashes.push_back(tokens[i]);
+        
+        group_files[group_id][filename] = info;
+    }
     else if (syncComm == "update_piece_info")
     {
         if (tokens.size() != 5)
